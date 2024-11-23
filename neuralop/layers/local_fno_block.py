@@ -35,15 +35,16 @@ class LocalFNOBlocks(nn.Module):
         in frequency space. Can either be specified as
         an int (for all dimensions) or an iterable with one
         number per dimension
+    default_in_shape : Tuple[int]
+        Default input shape on spatiotemporal dimensions.
     resolution_scaling_factor : Optional[Union[Number, List[Number]]], optional
         factor by which to scale outputs for super-resolution, by default None
     n_layers : int, optional
         number of Fourier layers to apply in sequence, by default 1
-    default_in_shape : Tuple[int]
-        Default input shape on spatiotemporal dimensions.
-    disco_layers : bool list, optional
+    disco_layers : bool or bool list, optional
         Must be same length as n_layers, dictates whether to include a
-        local integral kernel parallel connection at each layer
+        local integral kernel parallel connection at each layer. If a single
+        bool, shared for all layers.
     disco_kernel_shape: Union[int, List[int]]
         kernel shape for local integral. Expects either a single integer for isotropic kernels or two integers for anisotropic kernels
     domain_length: torch.Tensor, optional
@@ -54,11 +55,10 @@ class LocalFNOBlocks(nn.Module):
         whether to use a bias for the integral kernel, by default True
     radius_cutoff: float, optional
         cutoff radius (with respect to domain_length) for the local integral kernel, by default None
-    diff_layers : bool list, optional
+    diff_layers : bool or bool list, optional
         Must be same length as n_layers, dictates whether to include a
-        differential kernel parallel connection at each layer
-    fin_diff_implementation : str in ['subtract_middle', 'subtract_all'], optional
-        Implementation type for FiniteDifferenceConvolution. See differential_conv.py.
+        differential kernel parallel connection at each layer. If a single
+        bool, shared for all layers.
     conv_padding_mode : str in ['periodic', 'circular', 'replicate', 'reflect', 'zeros'], optional
         Padding mode for spatial convolution kernels.
     fin_diff_kernel_size : odd int, optional
@@ -133,14 +133,13 @@ class LocalFNOBlocks(nn.Module):
         default_in_shape,
         resolution_scaling_factor=None,
         n_layers=1,
-        disco_layers=[True],
+        disco_layers=True,
         disco_kernel_shape=[2,4],
         radius_cutoff=None,
         domain_length=[2,2],
         disco_groups=1,
         disco_bias=True,
-        diff_layers=[True],
-        fin_diff_implementation='subtract_middle',
+        diff_layers=True,
         conv_padding_mode='periodic',
         fin_diff_kernel_size=3,
         mix_derivatives=True,
@@ -172,7 +171,13 @@ class LocalFNOBlocks(nn.Module):
         self._n_modes = n_modes
 
         assert len(n_modes) == len(default_in_shape), "Spatiotemporal dimensions must be consistent"
-
+        
+        # If a single bool is passed for disco_layers or diff_layers, set values for all layers
+        if isinstance(disco_layers, bool):
+            disco_layers = [disco_layers] * n_layers
+        if isinstance(diff_layers, bool):
+            diff_layers = [diff_layers] * n_layers
+        
         if len(n_modes) > 3 and True in diff_layers:
             NotImplementedError("Differential convs not implemented for dimensions higher than 3.")
 
@@ -211,7 +216,6 @@ class LocalFNOBlocks(nn.Module):
         self.ada_in_features = ada_in_features
 
         self.diff_layers = diff_layers
-        self.fin_diff_implementation = fin_diff_implementation
         self.conv_padding_mode = conv_padding_mode
         self.default_in_shape = default_in_shape
         self.fin_diff_kernel_size = fin_diff_kernel_size
@@ -225,8 +229,20 @@ class LocalFNOBlocks(nn.Module):
         self.disco_bias = disco_bias
         self.periodic = (self.conv_padding_mode in ['circular', 'periodic'])
 
-        assert len(diff_layers) == n_layers, "Length of diff_layers must be n_layers"
-        assert len(disco_layers) == n_layers, "Length of disco_layers must be n_layers"
+        self.disco_layers = disco_layers
+        self.disco_kernel_shape = disco_kernel_shape
+        self.radius_cutoff = radius_cutoff
+        self.domain_length = domain_length
+        self.disco_groups = disco_groups
+        self.disco_bias = disco_bias
+        self.periodic = (self.conv_padding_mode in ['circular', 'periodic'])
+
+        assert len(diff_layers) == n_layers,\
+            f"diff_layers must either provide a single bool value or a list of booleans of length n_layers,\
+                got {len(diff_layers)=}"
+        assert len(disco_layers) == n_layers,\
+            f"disco_layers must either provide a single bool value or a list of booleans of length n_layers,\
+                    got {len(disco_layers)=}"
 
         self.convs = nn.ModuleList(
             [
@@ -263,7 +279,7 @@ class LocalFNOBlocks(nn.Module):
             [
                 FiniteDifferenceConvolution(self.in_channels, self.out_channels,
                                             self.n_dim, self.fin_diff_kernel_size, 
-                                            self.diff_groups, self.conv_padding_mode, fin_diff_implementation)
+                                            self.diff_groups, self.conv_padding_mode)
                 for _ in range(sum(self.diff_layers))
             ]
         )
@@ -447,7 +463,7 @@ class LocalFNOBlocks(nn.Module):
             x_localconv = 0
 
         x_skip_fno = self.fno_skips[index](x)
-        x_skip_fno_diff_disco = self.convs[index].transform(x_skip_fno + x_differential + x_localconv, output_shape=output_shape)
+        x_skip_local_fno = self.convs[index].transform(x_skip_fno + x_differential + x_localconv, output_shape=output_shape)
 
         if self.mlp is not None:
             x_skip_mlp = self.channel_mlp_skips[index](x)
@@ -458,7 +474,7 @@ class LocalFNOBlocks(nn.Module):
 
         x_fno = self.convs[index](x, output_shape=output_shape)
 
-        x = x_fno + x_skip_fno_diff_disco
+        x = x_fno + x_skip_local_fno
 
         if self.mlp is not None:
             if index < (self.n_layers - 1):
