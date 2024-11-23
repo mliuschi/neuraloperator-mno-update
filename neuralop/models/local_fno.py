@@ -16,10 +16,21 @@ from .base_model import BaseModel
 
 class LocalFNO(BaseModel, name='LocalFNO'):
     """N-Dimensional Local Fourier Neural Operator. The LocalFNO shares
-    its forward pass and architecture with the standard FNO, with the key difference
-    that its Fourier convolution layers are replaced with LocalFNOBlocks that place
-    differential kernel layers and local integral layers in parallel to its 
-    Fourier layers as detailed in [1]_.
+    its forward pass and architecture with the standard FNO, except that that in 
+    each layer, there can be up to four kinds of operations in parallel:
+        1. Spectral convolution (global)
+        2. Local convolution (integration with locally-supported kernel)
+        3. Differential kernel (local)
+        4. Pointwise
+    An FNO layer contains (1) and (4) in parallel. We find that supplementing these with 
+    (2) and (3) tend to help, especially in cases where FNO struggles to capture 
+    high frequencies, as introduced in [1]_.
+
+    Some useful architecture suggestions:
+        1. To better capture local features, it is recommended to increase `hidden_channels`
+        while decreasing `n_modes` (keeping the number of parameters constant).
+        2. In the experiments in [1]_, better performance was observed by prioritizing
+        using local operators in later layers in the architecture.
 
     Parameters
     ----------
